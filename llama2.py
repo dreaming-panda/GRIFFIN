@@ -194,7 +194,7 @@ class GriffinLlamaMLP(nn.Module):
                             self.neuron_stat = neuron_stat
                         else:
                             #self.neuron_stat = self.neuron_stat
-                            self.neuron_stat = (self.neuron_stat.square() + neuron_stat.square()).sqrt()
+                            self.neuron_stat = neuron_stat
                             
                         topk_weight, topk_indices = select_neurons(self.neuron_stat, self.config.selection_method, k)
                         
@@ -205,6 +205,7 @@ class GriffinLlamaMLP(nn.Module):
                     down_proj = self.down_proj(int_states)
 
                 else:
+                    
                     if k_factor == 0.0:
                         down_proj = 0 * x 
                     else:
@@ -1330,7 +1331,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
+            
             if track_position_ids is None:
                 track_position_ids = model_inputs["position_ids"]
             else:
@@ -1343,37 +1344,65 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 track_cache_position = torch.cat([track_cache_position, model_inputs["cache_position"]], dim=-1)
             
             # forward pass to get next token
-            
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )
             cur_len = input_ids.shape[1]
             gen_len = cur_len - initial_len
-            
-            if gen_len % kernel_size == 0 and gen_len > 0 and self.config.check:
-                past_key_values :GriffinCache = outputs.past_key_values
-                past_key_values.mode = "checking"
-                check_id = input_ids[:, -kernel_size:]
-                check_position = track_position_ids[:, -kernel_size:]
-                check_cache_position = track_cache_position[-kernel_size:]
-                check_attention_mask = model_inputs["attention_mask"]
-                outputs = self(
-                input_ids=check_id,
-                position_ids=check_position,
-                attention_mask=check_attention_mask,
-                cache_position=check_cache_position,
-                past_key_values=past_key_values,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
+            if gen_len >= 1:
+                
+                self.set_mlp_inference_mode("full")
+                full_outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
                 )
                 
+                self.set_mlp_inference_mode("partial")
+                past_key_values :GriffinCache = full_outputs.past_key_values
+                past_key_values.mode = "checking"
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+                self.set_mlp_inference_mode("full")
+                past_key_values :GriffinCache = outputs.past_key_values
+                past_key_values.mode = "checking"
+                self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
                 past_key_values.mode = "decoding"
-            if synced_gpus and this_peer_finished:
-                continue  # don't waste resources running the code we don't need
+            else:
+                self.set_mlp_inference_mode("full")
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+            # if gen_len % kernel_size == 0 and gen_len > 0 and self.config.check:
+            #     past_key_values :GriffinCache = outputs.past_key_values
+            #     past_key_values.mode = "checking"
+            #     check_id = input_ids[:, -kernel_size:]
+            #     check_position = track_position_ids[:, -kernel_size:]
+            #     check_cache_position = track_cache_position[-kernel_size:]
+            #     check_attention_mask = model_inputs["attention_mask"]
+            #     outputs = self(
+            #     input_ids=check_id,
+            #     position_ids=check_position,
+            #     attention_mask=check_attention_mask,
+            #     cache_position=check_cache_position,
+            #     past_key_values=past_key_values,
+            #     return_dict=True,
+            #     output_attentions=output_attentions,
+            #     output_hidden_states=output_hidden_states,
+            #     )
+                
+            #     past_key_values.mode = "decoding"
+            
 
             next_token_logits = outputs.logits[:, -1, :]
 
