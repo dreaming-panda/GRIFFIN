@@ -1347,34 +1347,43 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             cur_len = input_ids.shape[1]
             gen_len = cur_len - initial_len
             if gen_len >= 1:
-                
-                self.set_mlp_inference_mode("full")
-                full_outputs = self(
-                    **model_inputs,
-                    return_dict=True,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                )
-                
-                self.set_mlp_inference_mode("partial")
-                past_key_values :GriffinCache = full_outputs.past_key_values
-                past_key_values.mode = "checking"
-                outputs = self(
-                    **model_inputs,
-                    return_dict=True,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                )
-                self.set_mlp_inference_mode("full")
-                past_key_values :GriffinCache = outputs.past_key_values
-                past_key_values.mode = "checking"
-                self(
-                    **model_inputs,
-                    return_dict=True,
-                    output_attentions=output_attentions,
-                    output_hidden_states=output_hidden_states,
-                )
-                past_key_values.mode = "decoding"
+                if gen_len % 4 == 0:
+                    self.set_mlp_inference_mode("full")
+                    full_outputs = self(
+                        **model_inputs,
+                        return_dict=True,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                    )
+                    
+                    self.set_mlp_inference_mode("partial")
+                    past_key_values :GriffinCache = full_outputs.past_key_values
+                    past_key_values.mode = "checking"
+                    outputs = self(
+                        **model_inputs,
+                        return_dict=True,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                    )
+                    self.set_mlp_inference_mode("full")
+                    past_key_values :GriffinCache = outputs.past_key_values
+                    past_key_values.mode = "checking"
+                    self(
+                        **model_inputs,
+                        return_dict=True,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                    )
+                    past_key_values.mode = "decoding"
+
+                else:
+                    self.set_mlp_inference_mode("partial")
+                    outputs = self(
+                        **model_inputs,
+                        return_dict=True,
+                        output_attentions=output_attentions,
+                        output_hidden_states=output_hidden_states,
+                    )
             else:
                 self.set_mlp_inference_mode("full")
                 outputs = self(
