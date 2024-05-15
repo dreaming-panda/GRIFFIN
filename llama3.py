@@ -141,9 +141,7 @@ class GriffinLlamaMLP(nn.Module):
         
         self.k_factor = k_factor
         self.mode = config.mode
-        self.inference_mode = "full"
         self.neuron_stat: torch.Tensor = None
-        assert self.inference_mode in ["full", "partial", "pass"]
         assert self.mode in ['gen', 'class']
 
 
@@ -180,7 +178,8 @@ class GriffinLlamaMLP(nn.Module):
         else:
             k_factor = self.k_factor
             if self.mode == 'gen':
-                if self.inference_mode == 'full':
+                if x.shape[1] > 1:
+                    
                     
                     int_states :torch.Tensor = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
 
@@ -192,13 +191,11 @@ class GriffinLlamaMLP(nn.Module):
                         neuron_stat = neuron_stat.norm(dim=1)
                         if self.neuron_stat is None:
                             self.neuron_stat = neuron_stat
-                            stat = self.neuron_stat
                         else:
                             #self.neuron_stat = self.neuron_stat
-                            stat = self.neuron_stat = (8 * neuron_stat.square() + self.neuron_stat.square()).sqrt()
-                            self.neuron_stat = (neuron_stat.square() + self.neuron_stat.square()).sqrt()
+                            self.neuron_stat = (self.neuron_stat.square() + neuron_stat.square()).sqrt()
                             
-                        topk_weight, topk_indices = select_neurons(stat, self.config.selection_method, k)
+                        topk_weight, topk_indices = select_neurons(self.neuron_stat, self.config.selection_method, k)
                         
                         
                         
@@ -206,17 +203,30 @@ class GriffinLlamaMLP(nn.Module):
                         
                     down_proj = self.down_proj(int_states)
 
-                elif self.inference_mode == 'partial':
-                    
+                else:
                     if k_factor == 0.0:
                         down_proj = 0 * x 
                     else:
                         down_proj =self.down_proj_reduced(self.act_fn(self.gate_proj_reduced(x)) * self.up_proj_reduced(x))
+
+            elif self.mode == 'class':
+                assert x.shape[1] > 1
+                int_states = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+                if self.config.selection_method != 'magnitude': ###
+                    k = int(int_states.shape[-1] * k_factor)
+                    neuron_stat = ((int_states / int_states.norm(dim=-1).unsqueeze(-1)))[:, :-1].norm(dim=1) # B, D
+                    topk_weight, topk_indices = select_neurons(neuron_stat, self.config.selection_method, k)
+                    
+                    # Not tested for batch size > 1
+                    mask = torch.zeros_like(int_states[:, -1], dtype=torch.bool)
+                    mask.scatter_(dim=-1, index=topk_indices, src=torch.ones_like(mask))
+                    int_states[:, -1] = mask * int_states[:, -1]
+                    
                 else:
-                    int_states :torch.Tensor = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-                    down_proj = self.down_proj(int_states)
-
-
+                    int_states[:, -1, self.mag_mask.to(int_states.device)] = 0
+                down_proj = self.down_proj(int_states)
+            else:
+                raise NotImplementedError
         return down_proj
     def reset_stats(self):
         self.neuron_stat = None
@@ -953,10 +963,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         for layer in self.model.layers:
             layer.mlp.reset_stats()
             
-    def set_mlp_inference_mode(self, inference_mode:str):
-        for layer in self.model.layers:
-            layer.mlp.inference_mode = inference_mode
-
+        
     def sample(
         self,
         input_ids: torch.LongTensor,
@@ -1337,7 +1344,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-            
+
             if track_position_ids is None:
                 track_position_ids = model_inputs["position_ids"]
             else:
@@ -1350,69 +1357,16 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 track_cache_position = torch.cat([track_cache_position, model_inputs["cache_position"]], dim=-1)
             
             # forward pass to get next token
+            outputs = self(
+                **model_inputs,
+                return_dict=True,
+                output_attentions=output_attentions,
+                output_hidden_states=output_hidden_states,
+            )
             cur_len = input_ids.shape[1]
             gen_len = cur_len - initial_len
-            # if gen_len >= 1:
-            #     if gen_len % 4 == 0:
-            #         self.set_mlp_inference_mode("full")
-            #         full_outputs = self(
-            #             **model_inputs,
-            #             return_dict=True,
-            #             output_attentions=output_attentions,
-            #             output_hidden_states=output_hidden_states,
-            #         )
-                    
-            #         self.set_mlp_inference_mode("partial")
-            #         past_key_values :GriffinCache = full_outputs.past_key_values
-            #         past_key_values.mode = "checking"
-            if gen_len >= 1:
-                if self.config.griffin:
-                    self.set_mlp_inference_mode("partial")
-                outputs = self(
-                            **model_inputs,
-                            return_dict=True,
-                            output_attentions=output_attentions,
-                            output_hidden_states=output_hidden_states,
-                        )
-            else:
-                if self.config.griffin:
-                    self.set_mlp_inference_mode("full")
-                outputs = self(
-                            **model_inputs,
-                            return_dict=True,
-                            output_attentions=output_attentions,
-                            output_hidden_states=output_hidden_states,
-                        )
-            #         self.set_mlp_inference_mode("full")
-            #         past_key_values :GriffinCache = outputs.past_key_values
-            #         past_key_values.mode = "checking"
-            #         self(
-            #             **model_inputs,
-            #             return_dict=True,
-            #             output_attentions=output_attentions,
-            #             output_hidden_states=output_hidden_states,
-            #         )
-            #         past_key_values.mode = "decoding"
-
-            #     else:
-            #         self.set_mlp_inference_mode("partial")
-            #         outputs = self(
-            #             **model_inputs,
-            #             return_dict=True,
-            #             output_attentions=output_attentions,
-            #             output_hidden_states=output_hidden_states,
-            #         )
-            # else:
-            #     self.set_mlp_inference_mode("full")
-            #     outputs = self(
-            #         **model_inputs,
-            #         return_dict=True,
-            #         output_attentions=output_attentions,
-            #         output_hidden_states=output_hidden_states,
-            #     )
-            if gen_len % kernel_size == 0 and gen_len > 0 and self.config.check and self.config.griffin:
-               
-                self.set_mlp_inference_mode("full")
+            
+            if gen_len % kernel_size == 0 and gen_len > 0 and self.config.check:
                 past_key_values :GriffinCache = outputs.past_key_values
                 past_key_values.mode = "checking"
                 check_id = input_ids[:, -kernel_size:]
@@ -1431,7 +1385,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 )
                 
                 past_key_values.mode = "decoding"
-            
+            if synced_gpus and this_peer_finished:
+                continue  # don't waste resources running the code we don't need
 
             next_token_logits = outputs.logits[:, -1, :]
 

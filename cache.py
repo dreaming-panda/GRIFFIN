@@ -88,7 +88,12 @@ class GriffinCache(Cache):
             return self.key_cache[layer_idx], self.value_cache[layer_idx]
 
         else:
-            raise NotImplementedError
+            kernel_size = key_states.shape[-2]
+            key = self.key_cache[layer_idx].clone()
+            value = self.value_cache[layer_idx].clone()
+            key[...,-kernel_size:,:] = key_states
+            value[...,-kernel_size:,:] = value_states
+            return key, value
 
     def get_seq_length(self, layer_idx: Optional[int] = 0) -> int:
         """Returns the sequence length of the cached states. A layer index can be optionally passed."""
