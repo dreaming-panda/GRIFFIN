@@ -1192,9 +1192,9 @@ class XHFLM(TemplateLM):
         res = re_ords.get_original(res)
         
         pbar.close()
-        # total_step = self.model.total_steps
-        # num_step = self.model.num_steps
+        #total_step = self.model.total_steps
+        #num_step = self.model.num_steps
 
-        # print(total_step, num_step, total_step / num_step)
+        #print(total_step, num_step, total_step / num_step)
         #self.model.save_file()
         return res
