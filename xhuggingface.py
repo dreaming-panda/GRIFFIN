@@ -4,7 +4,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import List, Literal, Optional, Tuple, Union
 #from transformers import LlamaForCausalLM
-from llama2 import get_llama_griffin, LlamaForCausalLM
+from llama3 import get_llama_griffin, LlamaForCausalLM
 #from xLLaMA import XLlamaForCausalLM
 #from medusa.model.medusa_model import MedusaModel
 import torch
@@ -1192,5 +1192,9 @@ class XHFLM(TemplateLM):
         res = re_ords.get_original(res)
         
         pbar.close()
+        # total_step = self.model.total_steps
+        # num_step = self.model.num_steps
+
+        # print(total_step, num_step, total_step / num_step)
         #self.model.save_file()
         return res

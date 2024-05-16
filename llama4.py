@@ -143,8 +143,7 @@ class GriffinLlamaMLP(nn.Module):
         self.mode = config.mode
         self.inference_mode = "full"
         self.neuron_stat: torch.Tensor = None
-        self.reference = 0
-        assert self.inference_mode in ["full", "partial", "pass"]
+        assert self.inference_mode in ["full", "partial"]
         assert self.mode in ['gen', 'class']
 
 
@@ -189,14 +188,11 @@ class GriffinLlamaMLP(nn.Module):
                     if self.config.selection_method != 'magnitude' and k_factor > 0.0: ###
                         k = int(int_states.shape[-1] * k_factor)
                         
-                        states = int_states[:,self.reference:,:]
-                        
-                        neuron_stat = ((states / states.norm(dim=-1, keepdim=True))) # B, D
+                        neuron_stat = ((int_states / int_states.norm(dim=-1, keepdim=True))) # B, D
                         neuron_stat = neuron_stat.norm(dim=1)
                         if self.neuron_stat is None:
                             self.neuron_stat = neuron_stat
                             stat = self.neuron_stat
-                            
                         else:
                             #self.neuron_stat = self.neuron_stat
                             stat = (8 * neuron_stat.square() + self.neuron_stat.square()).sqrt()
@@ -210,17 +206,11 @@ class GriffinLlamaMLP(nn.Module):
                         
                     down_proj = self.down_proj(int_states)
 
-                elif self.inference_mode == 'partial':
-                    
+                else:
                     if k_factor == 0.0:
                         down_proj = 0 * x 
                     else:
                         down_proj =self.down_proj_reduced(self.act_fn(self.gate_proj_reduced(x)) * self.up_proj_reduced(x))
-                else:
-                    
-                    int_states :torch.Tensor = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-                    down_proj = self.down_proj(int_states)
-
 
         return down_proj
     def reset_stats(self):
@@ -958,10 +948,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         for layer in self.model.layers:
             layer.mlp.reset_stats()
             
-    def set_mlp_inference_mode(self, inference_mode:str, reference:int):
+    def set_mlp_inference_mode(self, inference_mode:str):
         for layer in self.model.layers:
             layer.mlp.inference_mode = inference_mode
-            layer.mlp.reference = reference
 
     def sample(
         self,
@@ -1177,268 +1166,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         else:
             return input_ids
     
-    def origin_greedy_search(
-        self,
-        input_ids: torch.LongTensor,
-        logits_processor: Optional[LogitsProcessorList] = None,
-        stopping_criteria: Optional[StoppingCriteriaList] = None,
-        max_length: Optional[int] = None,
-        pad_token_id: Optional[int] = None,
-        eos_token_id: Optional[Union[int, List[int]]] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        output_scores: Optional[bool] = None,
-        output_logits: Optional[bool] = None,
-        return_dict_in_generate: Optional[bool] = None,
-        synced_gpus: bool = False,
-        streamer: Optional["BaseStreamer"] = None,
-        **model_kwargs,
-    ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
-        r"""
-        Generates sequences of token ids for models with a language modeling head using **greedy decoding** and can be
-        used for text-decoder, text-to-text, speech-to-text, and vision-to-text models.
-
-        <Tip warning={true}>
-
-        In most cases, you do not need to call [`~generation.GenerationMixin.greedy_search`] directly. Use generate()
-        instead. For an overview of generation strategies and code examples, check the [following
-        guide](../generation_strategies).
-
-        </Tip>
-
-
-        Parameters:
-            input_ids (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-                The sequence used as a prompt for the generation.
-            logits_processor (`LogitsProcessorList`, *optional*):
-                An instance of [`LogitsProcessorList`]. List of instances of class derived from [`LogitsProcessor`]
-                used to modify the prediction scores of the language modeling head applied at each generation step.
-            stopping_criteria (`StoppingCriteriaList`, *optional*):
-                An instance of [`StoppingCriteriaList`]. List of instances of class derived from [`StoppingCriteria`]
-                used to tell if the generation loop should stop.
-
-            max_length (`int`, *optional*, defaults to 20):
-                **DEPRECATED**. Use `logits_processor` or `stopping_criteria` directly to cap the number of generated
-                tokens. The maximum length of the sequence to be generated.
-            pad_token_id (`int`, *optional*):
-                The id of the *padding* token.
-            eos_token_id (`Union[int, List[int]]`, *optional*):
-                The id of the *end-of-sequence* token. Optionally, use a list to set multiple *end-of-sequence* tokens.
-            output_attentions (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the attentions tensors of all attention layers. See `attentions` under
-                returned tensors for more details.
-            output_hidden_states (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the hidden states of all layers. See `hidden_states` under returned tensors
-                for more details.
-            output_scores (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the prediction scores. See `scores` under returned tensors for more details.
-            output_logits (`bool`, *optional*, defaults to `False`):
-                Whether or not to return the raw prediction logit scores. See `logits` under returned tensors
-                for more details.
-            return_dict_in_generate (`bool`, *optional*, defaults to `False`):
-                Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple.
-            synced_gpus (`bool`, *optional*, defaults to `False`):
-                Whether to continue running the while loop until max_length (needed for ZeRO stage 3)
-            streamer (`BaseStreamer`, *optional*):
-                Streamer object that will be used to stream the generated sequences. Generated tokens are passed
-                through `streamer.put(token_ids)` and the streamer is responsible for any further processing.
-            model_kwargs:
-                Additional model specific keyword arguments will be forwarded to the `forward` function of the model.
-                If model is an encoder-decoder model the kwargs should include `encoder_outputs`.
-
-        Return:
-            [`~generation.GenerateDecoderOnlyOutput`], [`~generation.GenerateEncoderDecoderOutput`] or
-            `torch.LongTensor`: A `torch.LongTensor` containing the generated tokens (default behaviour) or a
-            [`~generation.GenerateDecoderOnlyOutput`] if `model.config.is_encoder_decoder=False` and
-            `return_dict_in_generate=True` or a [`~generation.GenerateEncoderDecoderOutput`] if
-            `model.config.is_encoder_decoder=True`.
-
-        Examples:
-
-        ```python
-        >>> from transformers import (
-        ...     AutoTokenizer,
-        ...     AutoModelForCausalLM,
-        ...     LogitsProcessorList,
-        ...     MinLengthLogitsProcessor,
-        ...     StoppingCriteriaList,
-        ...     MaxLengthCriteria,
-        ... )
-
-        >>> tokenizer = AutoTokenizer.from_pretrained("openai-community/gpt2")
-        >>> model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
-
-        >>> # set pad_token_id to eos_token_id because GPT2 does not have a PAD token
-        >>> model.generation_config.pad_token_id = model.generation_config.eos_token_id
-
-        >>> input_prompt = "It might be possible to"
-        >>> input_ids = tokenizer(input_prompt, return_tensors="pt").input_ids
-
-        >>> # instantiate logits processors
-        >>> logits_processor = LogitsProcessorList(
-        ...     [
-        ...         MinLengthLogitsProcessor(10, eos_token_id=model.generation_config.eos_token_id),
-        ...     ]
-        ... )
-        >>> stopping_criteria = StoppingCriteriaList([MaxLengthCriteria(max_length=20)])
-
-        >>> outputs = model.greedy_search(
-        ...     input_ids, logits_processor=logits_processor, stopping_criteria=stopping_criteria
-        ... )
-
-        >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)
-        ["It might be possible to get a better understanding of the nature of the problem, but it's not"]
-        ```"""
-
-        
-        # init values
-        logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
-        stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
-        if max_length is not None:
-            warnings.warn(
-                "`max_length` is deprecated in this function, use"
-                " `stopping_criteria=StoppingCriteriaList([MaxLengthCriteria(max_length=max_length)])` instead.",
-                UserWarning,
-            )
-            stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-        pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
-        eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
-        if isinstance(eos_token_id, int):
-            eos_token_id = [eos_token_id]
-        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device) if eos_token_id is not None else None
-        output_scores = output_scores if output_scores is not None else self.generation_config.output_scores
-        output_attentions = (
-            output_attentions if output_attentions is not None else self.generation_config.output_attentions
-        )
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.generation_config.output_hidden_states
-        )
-        return_dict_in_generate = (
-            return_dict_in_generate
-            if return_dict_in_generate is not None
-            else self.generation_config.return_dict_in_generate
-        )
-
-        # init attention / hidden states / scores tuples
-        raw_logits = () if (return_dict_in_generate and output_logits) else None
-        scores = () if (return_dict_in_generate and output_scores) else None
-        decoder_attentions = () if (return_dict_in_generate and output_attentions) else None
-        cross_attentions = () if (return_dict_in_generate and output_attentions) else None
-        decoder_hidden_states = () if (return_dict_in_generate and output_hidden_states) else None
-
-        # if model is an encoder-decoder, retrieve encoder attention weights and hidden states
-        if return_dict_in_generate and self.config.is_encoder_decoder:
-            encoder_attentions = model_kwargs["encoder_outputs"].get("attentions") if output_attentions else None
-            encoder_hidden_states = (
-                model_kwargs["encoder_outputs"].get("hidden_states") if output_hidden_states else None
-            )
-
-        # keep track of which sequences are already finished
-        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
-
-        this_peer_finished = False  # used by synced_gpus only
-        while True:
-
-            # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-
-            # forward pass to get next token
-            outputs = self(
-                **model_inputs,
-                return_dict=True,
-                output_attentions=output_attentions,
-                output_hidden_states=output_hidden_states,
-            )
-
-            if synced_gpus and this_peer_finished:
-                continue  # don't waste resources running the code we don't need
-
-            next_token_logits = outputs.logits[:, -1, :]
-
-            # pre-process distribution
-            next_tokens_scores = logits_processor(input_ids, next_token_logits)
-
-            # Store scores, attentions and hidden_states when required
-            if return_dict_in_generate:
-                if output_scores:
-                    scores += (next_tokens_scores,)
-                if output_logits:
-                    raw_logits += (next_token_logits,)
-                if output_attentions:
-                    decoder_attentions += (
-                        (outputs.decoder_attentions,) if self.config.is_encoder_decoder else (outputs.attentions,)
-                    )
-                    if self.config.is_encoder_decoder:
-                        cross_attentions += (outputs.cross_attentions,)
-
-                if output_hidden_states:
-                    decoder_hidden_states += (
-                        (outputs.decoder_hidden_states,)
-                        if self.config.is_encoder_decoder
-                        else (outputs.hidden_states,)
-                    )
-
-            # argmax
-            next_tokens = torch.argmax(next_tokens_scores, dim=-1)
-
-            # finished sentences should have their next token be a padding token
-            if eos_token_id is not None:
-                if pad_token_id is None:
-                    raise ValueError("If `eos_token_id` is defined, make sure that `pad_token_id` is defined.")
-                next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
-
-            # update generated ids, model inputs, and length for next step
-            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-            if streamer is not None:
-                streamer.put(next_tokens.cpu())
-            model_kwargs = self._update_model_kwargs_for_generation(
-                outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
-            )
-
-            # if eos_token was found in one sentence, set sentence to finished
-            if eos_token_id_tensor is not None:
-                unfinished_sequences = unfinished_sequences.mul(
-                    next_tokens.tile(eos_token_id_tensor.shape[0], 1).ne(eos_token_id_tensor.unsqueeze(1)).prod(dim=0)
-                )
-
-                # stop when each sentence is finished
-                if unfinished_sequences.max() == 0:
-                    this_peer_finished = True
-
-            # stop if we exceed the maximum length
-            if stopping_criteria(input_ids, scores):
-                this_peer_finished = True
-
-            if this_peer_finished and not synced_gpus:
-                break
-
-        if streamer is not None:
-            streamer.end()
-
-        if return_dict_in_generate:
-            if self.config.is_encoder_decoder:
-                return GenerateEncoderDecoderOutput(
-                    sequences=input_ids,
-                    scores=scores,
-                    logits=raw_logits,
-                    encoder_attentions=encoder_attentions,
-                    encoder_hidden_states=encoder_hidden_states,
-                    decoder_attentions=decoder_attentions,
-                    cross_attentions=cross_attentions,
-                    decoder_hidden_states=decoder_hidden_states,
-                    past_key_values=model_kwargs.get("past_key_values"),
-                )
-            else:
-                return GenerateDecoderOnlyOutput(
-                    sequences=input_ids,
-                    scores=scores,
-                    logits=raw_logits,
-                    attentions=decoder_attentions,
-                    hidden_states=decoder_hidden_states,
-                    past_key_values=model_kwargs.get("past_key_values"),
-                )
-        else:
-            return input_ids
     def greedy_search(
         self,
         input_ids: torch.LongTensor,
@@ -1551,31 +1278,6 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         >>> tokenizer.batch_decode(outputs, skip_special_tokens=True)
         ["It might be possible to get a better understanding of the nature of the problem, but it's not"]
         ```"""
-        from copy import deepcopy
-        self.set_mlp_inference_mode("pass", 0)
-        tokens = self.origin_greedy_search(
-                input_ids,
-                logits_processor=logits_processor,
-                stopping_criteria=deepcopy(stopping_criteria),
-                pad_token_id=pad_token_id,
-                eos_token_id=eos_token_id,
-                output_scores=output_scores,
-                output_logits=output_logits,
-                return_dict_in_generate=return_dict_in_generate,
-                synced_gpus=synced_gpus,
-                streamer=streamer,
-                **model_kwargs,
-            )
-        
-        
-        
-        self.set_mlp_inference_mode("full", input_ids.shape[1])
-
-        self(
-                input_ids=tokens
-        )
-        
-        self.set_mlp_inference_mode("partial", 0)
         # init values
         kernel_size = self.config.kernel_size
         logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
@@ -1630,7 +1332,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
 
             # prepare model inputs
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
-            
+
             if track_position_ids is None:
                 track_position_ids = model_inputs["position_ids"]
             else:
@@ -1641,79 +1343,35 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 
             else:
                 track_cache_position = torch.cat([track_cache_position, model_inputs["cache_position"]], dim=-1)
-            
-            # forward pass to get next token
             cur_len = input_ids.shape[1]
             gen_len = cur_len - initial_len
-            # if gen_len >= 1:
-            #     if gen_len % 4 == 0:
-            #         self.set_mlp_inference_mode("full")
-            #         full_outputs = self(
-            #             **model_inputs,
-            #             return_dict=True,
-            #             output_attentions=output_attentions,
-            #             output_hidden_states=output_hidden_states,
-            #         )
-                    
-            #         self.set_mlp_inference_mode("partial")
-            #         past_key_values :GriffinCache = full_outputs.past_key_values
-            #         past_key_values.mode = "checking"
-            # if gen_len >= 1:
-            #     if self.config.griffin:
-            #         self.set_mlp_inference_mode("partial")
+            # forward pass to get next token
+            if gen_len >= 1:
+                self.set_mlp_inference_mode("partial")
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
+            else:
+                self.set_mlp_inference_mode("full")
+                outputs = self(
+                    **model_inputs,
+                    return_dict=True,
+                    output_attentions=output_attentions,
+                    output_hidden_states=output_hidden_states,
+                )
             
-            outputs = self(
-                            **model_inputs,
-                            return_dict=True,
-                            output_attentions=output_attentions,
-                            output_hidden_states=output_hidden_states,
-                        )
             
-            # else:
-            #     if self.config.griffin:
-            #         self.set_mlp_inference_mode("full")
-            #     outputs = self(
-            #                 **model_inputs,
-            #                 return_dict=True,
-            #                 output_attentions=output_attentions,
-            #                 output_hidden_states=output_hidden_states,
-            #             )
-            #         self.set_mlp_inference_mode("full")
-            #         past_key_values :GriffinCache = outputs.past_key_values
-            #         past_key_values.mode = "checking"
-            #         self(
-            #             **model_inputs,
-            #             return_dict=True,
-            #             output_attentions=output_attentions,
-            #             output_hidden_states=output_hidden_states,
-            #         )
-            #         past_key_values.mode = "decoding"
-
-            #     else:
-            #         self.set_mlp_inference_mode("partial")
-            #         outputs = self(
-            #             **model_inputs,
-            #             return_dict=True,
-            #             output_attentions=output_attentions,
-            #             output_hidden_states=output_hidden_states,
-            #         )
-            # else:
-            #     self.set_mlp_inference_mode("full")
-            #     outputs = self(
-            #         **model_inputs,
-            #         return_dict=True,
-            #         output_attentions=output_attentions,
-            #         output_hidden_states=output_hidden_states,
-            #     )
-            if gen_len % kernel_size == 0 and gen_len > 0 and self.config.check and self.config.griffin:
-               
-                self.set_mlp_inference_mode("pass", 0)
+            if gen_len % kernel_size == 0 and gen_len > 0 and self.config.check:
                 past_key_values :GriffinCache = outputs.past_key_values
                 past_key_values.mode = "checking"
                 check_id = input_ids[:, -kernel_size:]
                 check_position = track_position_ids[:, -kernel_size:]
                 check_cache_position = track_cache_position[-kernel_size:]
                 check_attention_mask = model_inputs["attention_mask"]
+                self.set_mlp_inference_mode("full")
                 outputs = self(
                 input_ids=check_id,
                 position_ids=check_position,
@@ -1726,7 +1384,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                 )
                 
                 past_key_values.mode = "decoding"
-            
+            if synced_gpus and this_peer_finished:
+                continue  # don't waste resources running the code we don't need
 
             next_token_logits = outputs.logits[:, -1, :]
 
@@ -1816,6 +1475,4 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
                     past_key_values=model_kwargs.get("past_key_values"),
                 )
         else:
-            
             return input_ids
-    
